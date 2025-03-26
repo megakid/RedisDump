@@ -1,4 +1,4 @@
-name: Build, Test & Publish
+name: Build, Test, Version & Publish
 
 on:
   push:
@@ -9,13 +9,29 @@ on:
       - main
 
 jobs:
-  build-and-test:
+  build-test-version:
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
+        with:
+          fetch-depth: 0  # needed for GitVersion to correctly calculate versions
+
+      - name: Install GitVersion
+        uses: gittools/actions/gitversion/setup@v1
+        with:
+          versionSpec: '5.x'
+
+      - name: Determine Version (GitVersion)
+        uses: gittools/actions/gitversion/execute@v1
+        id: gitversion
+
+      - name: Display Calculated Version
+        run: |
+          echo "FullSemVer: ${{ steps.gitversion.outputs.fullSemVer }}"
+          echo "NuGet Version: ${{ steps.gitversion.outputs.nuGetVersionV2 }}"
+
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
@@ -25,27 +41,32 @@ jobs:
         run: dotnet restore
 
       - name: Build solution
-        run: dotnet build --configuration Release --no-restore
+        run: dotnet build --configuration Release --no-restore /p:Version=${{ steps.gitversion.outputs.nuGetVersionV2 }}
 
-      - name: Run tests (including Testcontainers)
-        run: dotnet test --configuration Release --no-build --verbosity normal
-
-  publish:
-    runs-on: ubuntu-latest
-    needs: build-and-test
-    if: github.ref == 'refs/heads/main'
-    
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '8.x'
+      - name: Run tests (with Testcontainers)
+        run: dotnet test --configuration Release --no-build
 
       - name: Pack NuGet Package
-        run: dotnet pack --configuration Release --output ./nupkgs
+        if: github.ref == 'refs/heads/main'
+        run: dotnet pack --configuration Release --output ./nupkgs /p:PackageVersion=${{ steps.gitversion.outputs.nuGetVersionV2 }} --no-build
 
       - name: Publish to NuGet
-        run: dotnet nuget push ./nupkgs/*.nupkg --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
+        if: github.ref == 'refs/heads/main'
+        run: |
+          dotnet nuget push ./nupkgs/*.nupkg \
+            --api-key ${{ secrets.NUGET_API_KEY }} \
+            --source https://api.nuget.org/v3/index.json \
+            --skip-duplicate
+
+      - name: Tag the commit
+        if: github.ref == 'refs/heads/main'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const version = "${{ steps.gitversion.outputs.fullSemVer }}";
+            github.rest.git.createRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: `refs/tags/v${version}`,
+              sha: context.sha
+            });
