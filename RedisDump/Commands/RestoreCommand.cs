@@ -16,6 +16,21 @@ public class RestoreCommandSettings : SharedSettings
     [CommandOption("--flush")]
     [Description("Flush the database before restoring")]
     public bool Flush { get; set; }
+    
+    [CommandOption("-f|--force")]
+    [Description("Force restore even if keys already exist")]
+    public bool Force { get; set; }
+    
+    public override ValidationResult Validate()
+    {
+        // If flush is enabled, force must also be enabled
+        if (Flush && !Force)
+        {
+            return ValidationResult.Error("When using --flush, you must also specify --force");
+        }
+        
+        return base.Validate();
+    }
 }
 
 public class RestoreCommand : AsyncCommand<RestoreCommandSettings>
@@ -44,16 +59,13 @@ public class RestoreCommand : AsyncCommand<RestoreCommandSettings>
                 return 1;
             }
             
-            // Build connection string with password if provided
-            var connectionString = settings.ConnectionString;
-            if (!string.IsNullOrEmpty(settings.Password))
-            {
-                connectionString = $"{connectionString},password={settings.Password}";
-            }
-            
-            // Connect to Redis
-            AnsiConsole.MarkupLine($"[yellow]Connecting to Redis at {settings.ConnectionString}...[/]");
-            var connection = await ConnectionMultiplexer.ConnectAsync(connectionString);
+            // Connect to Redis using the full connection string
+            var configOptions = ConfigurationOptions.Parse(settings.ConnectionString);
+            AnsiConsole.MarkupLine($"[yellow]Connecting to Redis at {configOptions}...[/]");
+            var connection = await ConnectionMultiplexer.ConnectAsync(configOptions);
+
+            // Parse defaultDatabase from connection string if present
+            int? specificDatabase = configOptions.DefaultDatabase;
             
             // Process the databases
             var totalKeysRestored = 0;
@@ -70,7 +82,7 @@ public class RestoreCommand : AsyncCommand<RestoreCommandSettings>
                         var dbData = dbEntry.Value;
                         
                         // Filter databases if needed
-                        if (settings.Database.HasValue && dbNumber != settings.Database.Value)
+                        if (specificDatabase.HasValue && dbNumber != specificDatabase.Value)
                         {
                             progressTask.Increment(1);
                             continue;
@@ -80,7 +92,7 @@ public class RestoreCommand : AsyncCommand<RestoreCommandSettings>
                         keysTask.MaxValue = dbData.Count;
                         
                         var keysRestored = await RestoreDatabaseAsync(connection, dbNumber, dbData, settings.Flush, 
-                            verbose: settings.Verbose, progressTask: keysTask);
+                            verbose: settings.Verbose, force: settings.Force, progressTask: keysTask);
                         
                         totalKeysRestored += keysRestored;
                         progressTask.Increment(1);
@@ -111,6 +123,7 @@ public class RestoreCommand : AsyncCommand<RestoreCommandSettings>
         Dictionary<string, JsonElement> data, 
         bool flush,
         bool verbose,
+        bool force,
         ProgressTask progressTask)
     {
         var db = connection.GetDatabase(databaseNumber);
@@ -132,6 +145,18 @@ public class RestoreCommand : AsyncCommand<RestoreCommandSettings>
             var server = connection.GetServer(connection.GetEndPoints().First());
             await server.FlushDatabaseAsync(databaseNumber);
         }
+        else if (!force)
+        {
+            // Instead of checking each key, just check if the database is empty
+            var server = connection.GetServer(connection.GetEndPoints().First());
+            var keyCount = server.DatabaseSize(databaseNumber);
+            
+            if (keyCount > 0)
+            {
+                throw new InvalidOperationException(
+                    $"Database {databaseNumber} is not empty ({keyCount} keys exist). Use --force flag to overwrite existing keys or --flush to clear the database first.");
+            }
+        }
         
         // Use a transaction for better performance
         var batch = db.CreateBatch();
@@ -144,6 +169,16 @@ public class RestoreCommand : AsyncCommand<RestoreCommandSettings>
             
             try
             {
+                // Check if key exists (for warning if force is set)
+                if (force && !flush)
+                {
+                    var keyExists = await db.KeyExistsAsync(key);
+                    if (keyExists && verbose)
+                    {
+                        AnsiConsole.MarkupLine($"[yellow]Warning:[/] Overwriting existing key: {key}");
+                    }
+                }
+                
                 // Get type of data
                 string type = jsonData.GetProperty("Type").GetString() ?? "string";
                 TimeSpan? ttl = null;
@@ -275,6 +310,7 @@ public class RestoreCommand : AsyncCommand<RestoreCommandSettings>
                 }
             }
             
+            // Update progress
             progressTask.Increment(1);
         }
         

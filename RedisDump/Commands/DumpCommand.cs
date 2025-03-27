@@ -31,32 +31,30 @@ public class DumpCommand : AsyncCommand<DumpCommandSettings>
         
         try
         {
-            // Build connection string with password if provided
-            var connectionString = settings.ConnectionString;
-            if (!string.IsNullOrEmpty(settings.Password))
-            {
-                connectionString = $"{connectionString},password={settings.Password}";
-            }
+            // Connect to Redis using the full connection string
+            var configOptions = ConfigurationOptions.Parse(settings.ConnectionString);
+            AnsiConsole.MarkupLine($"[yellow]Connecting to Redis at {configOptions}...[/]");
+            var connection = await ConnectionMultiplexer.ConnectAsync(configOptions);
 
             // Connect to Redis
-            AnsiConsole.MarkupLine($"[yellow]Connecting to Redis at {settings.ConnectionString}...[/]");
-            var connection = await ConnectionMultiplexer.ConnectAsync(connectionString);
-            
             // Get server
             var server = connection.GetServer(connection.GetEndPoints().First());
             
             var result = new Dictionary<int, Dictionary<string, object>>();
             
-            if (settings.Database.HasValue)
+            // Parse defaultDatabase from connection string if present
+            int? specificDatabase = configOptions.DefaultDatabase;
+            
+            if (specificDatabase.HasValue)
             {
                 // Only dump specified database
-                AnsiConsole.MarkupLine($"[yellow]Dumping database {settings.Database.Value}...[/]");
-                result.Add(settings.Database.Value, await DumpDatabaseAsync(connection, settings.Database.Value, settings.Verbose));
+                AnsiConsole.MarkupLine($"[yellow]Dumping default database {specificDatabase.Value}...[/]");
+                result.Add(specificDatabase.Value, await DumpDatabaseAsync(connection, specificDatabase.Value, settings.Verbose));
             }
             else
             {
                 // Dump all databases
-                AnsiConsole.MarkupLine("[yellow]Dumping all databases...[/]");
+                AnsiConsole.MarkupLine("[yellow]No default database set, dumping all databases...[/]");
                 
                 // Get the number of databases
                 var databaseCount = server.DatabaseCount;
