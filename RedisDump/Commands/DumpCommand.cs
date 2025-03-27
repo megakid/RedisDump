@@ -21,10 +21,56 @@ public class DumpCommandSettings : SharedSettings
     [Description("Output file path")]
     [DefaultValue("redis-dump.json")]
     public string OutputFile { get; set; } = "redis-dump.json";
+    
+    [CommandOption("-b|--batch-size <SIZE>")]
+    [Description("Number of keys to process in a single Lua batch")]
+    [DefaultValue(100)]
+    public int BatchSize { get; set; } = 100;
 }
 
 public class DumpCommand : AsyncCommand<DumpCommandSettings>
 {
+    // Lua script to get key data (type, TTL, value) in a single operation
+    private const string LuaDumpScript = @"
+local result = {}
+for i, key in ipairs(KEYS) do
+    local keyType = redis.call('TYPE', key).ok
+    local ttl = redis.call('PTTL', key)
+    
+    local keyData = {}
+    keyData.type = keyType
+    keyData.ttl = ttl
+    
+    -- Get value based on type
+    if keyType == 'string' then
+        keyData.value = redis.call('GET', key)
+    elseif keyType == 'list' then
+        keyData.value = redis.call('LRANGE', key, 0, -1)
+    elseif keyType == 'set' then
+        keyData.value = redis.call('SMEMBERS', key)
+    elseif keyType == 'zset' then
+        local withScores = redis.call('ZRANGE', key, 0, -1, 'WITHSCORES')
+        local formatted = {}
+        for j = 1, #withScores, 2 do
+            local member = withScores[j]
+            local score = tonumber(withScores[j+1])
+            table.insert(formatted, {member=member, score=score})
+        end
+        keyData.value = formatted
+    elseif keyType == 'hash' then
+        local hash = redis.call('HGETALL', key)
+        local formatted = {}
+        for j = 1, #hash, 2 do
+            formatted[hash[j]] = hash[j+1]
+        end
+        keyData.value = formatted
+    end
+    
+    result[key] = keyData
+end
+return cjson.encode(result)
+";
+
     public override async Task<int> ExecuteAsync(CommandContext context, DumpCommandSettings settings)
     {
         AnsiConsole.MarkupLine("[bold blue]Redis Dump Tool[/]");
@@ -36,20 +82,20 @@ public class DumpCommand : AsyncCommand<DumpCommandSettings>
             AnsiConsole.MarkupLine($"[yellow]Connecting to Redis at {configOptions}...[/]");
             var connection = await ConnectionMultiplexer.ConnectAsync(configOptions);
 
-            // Connect to Redis
             // Get server
             var server = connection.GetServer(connection.GetEndPoints().First());
             
             var result = new Dictionary<int, Dictionary<string, object>>();
             
             // Parse defaultDatabase from connection string if present
-            int? specificDatabase = configOptions.DefaultDatabase;
+            var specificDatabase = configOptions.DefaultDatabase;
             
             if (specificDatabase.HasValue)
             {
                 // Only dump specified database
                 AnsiConsole.MarkupLine($"[yellow]Dumping default database {specificDatabase.Value}...[/]");
-                result.Add(specificDatabase.Value, await DumpDatabaseAsync(connection, specificDatabase.Value, settings.Verbose));
+
+                await DumpDatabases(settings, [specificDatabase.Value], result, connection);
             }
             else
             {
@@ -57,20 +103,9 @@ public class DumpCommand : AsyncCommand<DumpCommandSettings>
                 AnsiConsole.MarkupLine("[yellow]No default database set, dumping all databases...[/]");
                 
                 // Get the number of databases
-                var databaseCount = server.DatabaseCount;
+                var databaseCount = server.DatabaseCount == 0 ? 16 : server.DatabaseCount;
                 
-                await AnsiConsole.Progress()
-                    .StartAsync(async ctx =>
-                    {
-                        var task = ctx.AddTask("[green]Dumping databases[/]");
-                        task.MaxValue = databaseCount;
-                        
-                        for (int i = 0; i < databaseCount; i++)
-                        {
-                            result.Add(i, await DumpDatabaseAsync(connection, i, settings.Verbose));
-                            task.Increment(1);
-                        }
-                    });
+                await DumpDatabases(settings, Enumerable.Range(0, databaseCount), result, connection);
             }
             
             // Save to file
@@ -104,22 +139,216 @@ public class DumpCommand : AsyncCommand<DumpCommandSettings>
             return 1;
         }
     }
-    
-    private async Task<Dictionary<string, object>> DumpDatabaseAsync(ConnectionMultiplexer connection, int databaseNumber, bool verbose)
+
+    private async Task DumpDatabases(DumpCommandSettings settings, IEnumerable<int> databases, Dictionary<int, Dictionary<string, object>> result,
+        ConnectionMultiplexer connection)
     {
+        await AnsiConsole.Progress()
+            .StartAsync(async ctx =>
+            {
+                foreach (var database in databases)
+                {
+                    result.Add(database, await DumpDatabaseAsync(connection, database, ctx, settings.Verbose, settings.BatchSize));
+                }
+            });
+    }
+
+    private async Task<Dictionary<string, object>> DumpDatabaseAsync(ConnectionMultiplexer connection,
+        int databaseNumber, ProgressContext ctx, bool verbose, int batchSize)
+    {
+        var task = ctx.AddTask($"[green]Dumping database {databaseNumber}[/]");
+
         var db = connection.GetDatabase(databaseNumber);
         var server = connection.GetServer(connection.GetEndPoints().First());
         
         var result = new Dictionary<string, object>();
-        
+
         // Get all keys
-        var keys = server.Keys(databaseNumber, pattern: "*").ToArray();
-        
+        var keys = server.Keys(databaseNumber, pattern: "*")
+            .OrderBy(x => x.ToString())
+            .ToArray();
+
+        task.Description = $"[green]Dumping database {databaseNumber} ({keys.Length} keys)[/]";
+        // Set MaxValue to at least 1 to avoid division by zero in progress calculations
+        task.MaxValue = Math.Max(1, keys.Length);
+
         if (verbose)
         {
             AnsiConsole.MarkupLine($"[grey]Database {databaseNumber}: Found {keys.Length} keys[/]");
         }
+
+        if (keys.Length == 0)
+        {
+            // For empty databases, mark the task as completed
+            task.Value = task.MaxValue;
+            return result;
+        }
+
+        // Process keys in batches
+        for (var i = 0; i < keys.Length; i += batchSize)
+        {
+            // Take a batch of keys
+            var batchKeys = keys.Skip(i).Take(batchSize).ToArray();
+            
+            if (batchKeys.Length == 0)
+                continue;
+
+            try
+            {
+                // Execute the Lua script with the current batch of keys
+                var scriptResult = await db.ScriptEvaluateAsync(
+                    LuaDumpScript,
+                    batchKeys.Select(k => k).ToArray()
+                );
+                
+                // Parse the JSON result
+                if (scriptResult.IsNull)
+                {
+                    if (verbose)
+                    {
+                        AnsiConsole.MarkupLine($"[grey]Lua script returned null for batch starting at key {i}[/]");
+                    }
+                    continue;
+                }
+                
+                var jsonResult = scriptResult.ToString();
+                var doc = JsonDocument.Parse(jsonResult);
+                var root = doc.RootElement;
+                
+                // Process each key in the batch
+                foreach (var keyProperty in root.EnumerateObject())
+                {
+                    var key = keyProperty.Name;
+                    var keyData = keyProperty.Value;
+                    
+                    // Get type and TTL
+                    var type = keyData.GetProperty("type").GetString()?.ToLowerInvariant() ?? "";
+                    
+                    // Skip if type is missing
+                    if (string.IsNullOrEmpty(type))
+                        continue;
+                    
+                    // Get TTL
+                    var ttl = keyData.GetProperty("ttl").GetInt64();
+                    var ttlValue = ttl >= 0 ? (double?)ttl : null;
+                    
+                    try
+                    {
+                        // Process based on type
+                        switch (type)
+                        {
+                            case "string":
+                                result[key] = new RedisKeyData
+                                {
+                                    Type = "string",
+                                    Value = keyData.GetProperty("value").GetString() ?? "",
+                                    TTL = ttlValue
+                                };
+                                break;
+                                
+                            case "list":
+                                var listValue = keyData.GetProperty("value").EnumerateArray()
+                                    .Select(v => v.GetString() ?? "")
+                                    .ToArray();
+                                    
+                                result[key] = new RedisKeyData
+                                {
+                                    Type = "list",
+                                    Value = listValue,
+                                    TTL = ttlValue
+                                };
+                                break;
+                                
+                            case "set":
+                                var setValue = keyData.GetProperty("value").EnumerateArray()
+                                    .Select(v => v.GetString() ?? "")
+                                    .ToArray();
+                                    
+                                result[key] = new RedisKeyData
+                                {
+                                    Type = "set",
+                                    Value = setValue,
+                                    TTL = ttlValue
+                                };
+                                break;
+                                
+                            case "zset":
+                                var zsetEntries = new List<object>();
+                                
+                                foreach (var entry in keyData.GetProperty("value").EnumerateArray())
+                                {
+                                    var member = entry.GetProperty("member").GetString() ?? "";
+                                    var score = entry.GetProperty("score").GetDouble();
+                                    
+                                    zsetEntries.Add(new 
+                                    { 
+                                        Member = member, 
+                                        Score = score 
+                                    });
+                                }
+                                
+                                result[key] = new RedisKeyData
+                                {
+                                    Type = "zset",
+                                    Value = zsetEntries.ToArray(),
+                                    TTL = ttlValue
+                                };
+                                break;
+                                
+                            case "hash":
+                                var hashEntries = new Dictionary<string, string>();
+                                
+                                foreach (var entry in keyData.GetProperty("value").EnumerateObject())
+                                {
+                                    hashEntries[entry.Name] = entry.Value.GetString() ?? "";
+                                }
+                                
+                                result[key] = new RedisKeyData
+                                {
+                                    Type = "hash",
+                                    Value = hashEntries,
+                                    TTL = ttlValue
+                                };
+                                break;
+                                
+                            default:
+                                if (verbose)
+                                {
+                                    AnsiConsole.MarkupLine($"[grey]Skipping key {key} of unsupported type {type}[/]");
+                                }
+                                break;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        if (verbose)
+                        {
+                            AnsiConsole.MarkupLine($"[grey]Error processing key {key}: {ex.Message}[/]");
+                        }
+                    }
+                }
+            }
+            catch (Exception luaEx)
+            {
+                if (verbose)
+                {
+                    AnsiConsole.MarkupLine($"[grey]Lua script error: {luaEx.Message}. Falling back to individual queries for this batch.[/]");
+                }
+                
+                // Fallback: process keys individually for this batch
+                await ProcessKeysBatch(db, batchKeys, result, verbose);
+            }
+            
+            // Update progress
+            task.Increment(batchKeys.Length);
+        }
         
+        return result;
+    }
+
+    // Fallback method for processing keys individually if the Lua script fails
+    private async Task ProcessKeysBatch(IDatabase db, RedisKey[] keys, Dictionary<string, object> result, bool verbose)
+    {
         foreach (var key in keys)
         {
             var keyString = key.ToString() ?? "";
@@ -189,7 +418,5 @@ public class DumpCommand : AsyncCommand<DumpCommandSettings>
                     break;
             }
         }
-        
-        return result;
     }
 } 

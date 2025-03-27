@@ -1,0 +1,16 @@
+{
+    "profiles": {
+      "Run dump": {
+        "commandName": "Project",
+        "environmentVariables": {
+        },
+        "commandLineArgs": "dump --connection localhost:6379"
+      },
+      "Run restore": {
+        "commandName": "Project",
+        "environmentVariables": {
+        },
+        "commandLineArgs": "restore --connection localhost:6379"
+      }
+    }
+  }

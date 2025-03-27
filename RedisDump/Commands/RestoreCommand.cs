@@ -88,8 +88,7 @@ public class RestoreCommand : AsyncCommand<RestoreCommandSettings>
                             continue;
                         }
                         
-                        var keysTask = ctx.AddTask($"[green]DB {dbNumber}: Restoring keys[/]");
-                        keysTask.MaxValue = dbData.Count;
+                        var keysTask = ctx.AddTask($"[green]DB {dbNumber}: Restoring keys ({dbData.Count} keys)[/]");
                         
                         var keysRestored = await RestoreDatabaseAsync(connection, dbNumber, dbData, settings.Flush, 
                             verbose: settings.Verbose, force: settings.Force, progressTask: keysTask);
@@ -129,9 +128,19 @@ public class RestoreCommand : AsyncCommand<RestoreCommandSettings>
         var db = connection.GetDatabase(databaseNumber);
         var restoredCount = 0;
         
+        // Set MaxValue to at least 1 to avoid division by zero
+        progressTask.MaxValue = Math.Max(1, data.Count);
+        
         if (verbose)
         {
             AnsiConsole.MarkupLine($"[grey]Restoring {data.Count} keys to database {databaseNumber}[/]");
+        }
+        
+        // If no keys to restore, mark as complete and return
+        if (data.Count == 0)
+        {
+            progressTask.Value = progressTask.MaxValue;
+            return 0;
         }
         
         // Flush database if requested
