@@ -1,5 +1,0 @@
-mode: ContinuousDelivery
-increment: Patch
-branches:
-  main:
-    increment: Patch
