@@ -2,6 +2,10 @@
 
 A .NET command-line tool for dumping and restoring Redis data.
 
+## Why This Tool?
+
+This tool was made to simplify dumping and restoring Redis databases when other methods are either difficult or impractical. Redis-cli doesn't work well under Windows, while this tool is fully cross-platform. It enables direct dump/restore functionality via the standard Redis API, eliminating the need for server-side access to RDB files. This is particularly helpful when working with AWS ElastiCache Redis instances which hide away the server-side RDB files and restrict certain commands.
+
 ## Installation
 
 ```bash
