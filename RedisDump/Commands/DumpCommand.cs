@@ -7,7 +7,6 @@ using StackExchange.Redis;
 
 namespace RedisDump.Commands;
 
-// Record to represent Redis key data
 public record RedisKeyData
 {
     public required string Type { get; init; }
