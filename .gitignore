@@ -8,3 +8,4 @@ nupkg/
 .DS_Store
 *.DotSettings.user
 .vs
+*.csproj.user

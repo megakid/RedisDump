@@ -64,9 +64,6 @@ public class RestoreCommand : AsyncCommand<RestoreCommandSettings>
             AnsiConsole.MarkupLine($"[yellow]Connecting to Redis at {configOptions}...[/]");
             var connection = await ConnectionMultiplexer.ConnectAsync(configOptions);
 
-            // Parse defaultDatabase from connection string if present
-            int? specificDatabase = configOptions.DefaultDatabase;
-            
             // Process the databases
             var totalKeysRestored = 0;
             
@@ -81,8 +78,8 @@ public class RestoreCommand : AsyncCommand<RestoreCommandSettings>
                         var dbNumber = dbEntry.Key;
                         var dbData = dbEntry.Value;
                         
-                        // Filter databases if needed
-                        if (specificDatabase.HasValue && dbNumber != specificDatabase.Value)
+                        // Only filter databases if specific ones were requested
+                        if (settings.Databases != null && settings.Databases.Length > 0 && !settings.Databases.Contains(dbNumber))
                         {
                             progressTask.Increment(1);
                             continue;
@@ -169,6 +166,7 @@ public class RestoreCommand : AsyncCommand<RestoreCommandSettings>
         
         // Use a transaction for better performance
         var batch = db.CreateBatch();
+        
         var pendingTasks = new List<Task>();
         
         foreach (var kvp in data)

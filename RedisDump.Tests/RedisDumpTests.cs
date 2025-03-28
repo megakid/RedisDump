@@ -3,7 +3,6 @@ using StackExchange.Redis;
 using Testcontainers.Redis;
 using Xunit.Abstractions;
 using RedisDump.Commands;
-using Spectre.Console.Cli;
 
 namespace RedisDump.Tests;
 
@@ -60,14 +59,14 @@ public class RedisDumpTests : IAsyncLifetime
     public async Task FullDumpAndRestoreTest()
     {
         // Arrange - Connect to source Redis and add test data of different types
-        await SetupTestDataAsync();
+        var sourceConnection = await ConnectionMultiplexer.ConnectAsync(_sourceRedisContainer.GetConnectionString());
+        
+        // Populate the default database (0)
+        await PopulateDatabaseAsync(sourceConnection, 0);
 
         try
         {
-            // Act - Execute the dump command
-            _output.WriteLine("Executing Redis dump command...");
-            
-            var dumpCommand = new DumpCommand();
+            // Act - Execute the dump and restore commands
             var dumpSettings = new DumpCommandSettings
             {
                 ConnectionString = _sourceRedisContainer.GetConnectionString(),
@@ -75,16 +74,6 @@ public class RedisDumpTests : IAsyncLifetime
                 Verbose = true
             };
             
-            var dumpResult = await dumpCommand.ExecuteAsync(null!, dumpSettings);
-            dumpResult.Should().Be(0, "Dump command should succeed");
-            
-            // Verify the dump file was created
-            File.Exists(_dumpFilePath).Should().BeTrue("Dump file should exist");
-            
-            // Execute the restore command
-            _output.WriteLine("Executing Redis restore command...");
-            
-            var restoreCommand = new RestoreCommand();
             var restoreSettings = new RestoreCommandSettings
             {
                 ConnectionString = _targetRedisContainer.GetConnectionString(),
@@ -92,33 +81,45 @@ public class RedisDumpTests : IAsyncLifetime
                 Verbose = true
             };
             
-            var restoreResult = await restoreCommand.ExecuteAsync(null!, restoreSettings);
+            var restoreResult = await ExecuteDumpAndRestoreAsync(dumpSettings, restoreSettings);
             restoreResult.Should().Be(0, "Restore command should succeed");
-            
-            // Assert - Verify the data in target Redis
-            await VerifyRestoredDataAsync();
-            
-            _output.WriteLine("All data verified successfully");
         }
         catch (Exception ex)
         {
             _output.WriteLine($"Test failed with exception: {ex}");
             throw;
         }
+
+        // Assert - Verify the data in target Redis
+        _output.WriteLine("Verifying restored data...");
+
+        var targetConnection = await ConnectionMultiplexer.ConnectAsync(_targetRedisContainer.GetConnectionString());
+
+        // Verify the default database (0)
+        await VerifyDatabaseAsync(targetConnection, 0);
+
+        _output.WriteLine("All data verified successfully");
     }
     
     [Fact]
     public async Task MultiDatabaseDumpAndRestoreTest()
     {
         // Arrange - Connect to source Redis and add test data to multiple databases
-        await SetupMultiDatabaseTestDataAsync();
+        var sourceConnection = await ConnectionMultiplexer.ConnectAsync(_sourceRedisContainer.GetConnectionString());
+        
+        _output.WriteLine("Adding test data to multiple databases in source Redis...");
+
+        // Populate databases 0-3 with test data
+        for (int i1 = 0; i1 <= 3; i1++)
+        {
+            await PopulateDatabaseAsync(sourceConnection, i1);
+        }
+
+        _output.WriteLine("Test data added successfully to multiple databases");
 
         try
         {
-            // Act - Execute the dump command for all databases
-            _output.WriteLine("Executing Redis dump command for multiple databases...");
-            
-            var dumpCommand = new DumpCommand();
+            // Act - Execute the dump and restore commands for all databases
             var dumpSettings = new DumpCommandSettings
             {
                 ConnectionString = _sourceRedisContainer.GetConnectionString(),
@@ -126,16 +127,6 @@ public class RedisDumpTests : IAsyncLifetime
                 Verbose = true
             };
             
-            var dumpResult = await dumpCommand.ExecuteAsync(null!, dumpSettings);
-            dumpResult.Should().Be(0, "Dump command should succeed");
-            
-            // Verify the dump file was created
-            File.Exists(_dumpFilePath).Should().BeTrue("Dump file should exist");
-            
-            // Execute the restore command for all databases
-            _output.WriteLine("Executing Redis restore command for multiple databases...");
-            
-            var restoreCommand = new RestoreCommand();
             var restoreSettings = new RestoreCommandSettings
             {
                 ConnectionString = _targetRedisContainer.GetConnectionString(),
@@ -143,101 +134,107 @@ public class RedisDumpTests : IAsyncLifetime
                 Verbose = true
             };
             
-            var restoreResult = await restoreCommand.ExecuteAsync(null!, restoreSettings);
+            var restoreResult = await ExecuteDumpAndRestoreAsync(dumpSettings, restoreSettings);
             restoreResult.Should().Be(0, "Restore command should succeed");
-            
-            // Assert - Verify the data in target Redis across all databases
-            await VerifyMultiDatabaseRestoredDataAsync();
-            
-            _output.WriteLine("All data verified successfully across multiple databases");
         }
         catch (Exception ex)
         {
             _output.WriteLine($"Test failed with exception: {ex}");
             throw;
         }
+
+        // Assert - Verify the data in target Redis across all databases
+        _output.WriteLine("Verifying restored data across multiple databases...");
+
+        var targetConnection = await ConnectionMultiplexer.ConnectAsync(_targetRedisContainer.GetConnectionString());
+
+        // Verify databases 0-3
+        for (int i = 0; i <= 3; i++)
+        {
+            await VerifyDatabaseAsync(targetConnection, i);
+        }
+
+        _output.WriteLine("All data verified successfully across multiple databases");
     }
     
     [Fact]
     public async Task SpecificDatabaseDumpAndRestoreTest()
     {
+        int specificDatabase = 2; // We'll test with database 2
+
         // Arrange - Connect to source Redis and add test data to multiple databases
-        await SetupMultiDatabaseTestDataAsync();
+        var sourceConnection = await ConnectionMultiplexer.ConnectAsync(_sourceRedisContainer.GetConnectionString());
+        
+        _output.WriteLine("Adding test data to multiple databases in source Redis...");
+
+        // Populate databases 0-3 with test data
+        for (int i1 = 0; i1 <= 3; i1++)
+        {
+            await PopulateDatabaseAsync(sourceConnection, i1);
+        }
+
+        _output.WriteLine("Test data added successfully to multiple databases");
 
         try
         {
-            // Act - Execute the dump command for a specific database using connection string options
-            _output.WriteLine("Executing Redis dump command for specific database...");
-            
-            int specificDatabase = 2; // We'll test with database 2
-            
-            var dumpCommand = new DumpCommand();
+            // Act - Execute the dump and restore commands for a specific database
             var dumpSettings = new DumpCommandSettings
             {
-                // Using connection string with defaultDatabase parameter
-                ConnectionString = $"{_sourceRedisContainer.GetConnectionString()},defaultDatabase={specificDatabase}",
+                ConnectionString = _sourceRedisContainer.GetConnectionString(),
                 OutputFile = _dumpFilePath,
+                Databases = [specificDatabase], // Explicitly set to only use database 2
                 Verbose = true
             };
             
-            var dumpResult = await dumpCommand.ExecuteAsync(null!, dumpSettings);
-            dumpResult.Should().Be(0, "Dump command should succeed");
-            
-            // Verify the dump file was created
-            File.Exists(_dumpFilePath).Should().BeTrue("Dump file should exist");
-            
-            // Execute the restore command for a specific database
-            _output.WriteLine("Executing Redis restore command for specific database...");
-            
-            var restoreCommand = new RestoreCommand();
             var restoreSettings = new RestoreCommandSettings
             {
-                // Using connection string with defaultDatabase parameter
-                ConnectionString = $"{_targetRedisContainer.GetConnectionString()},defaultDatabase={specificDatabase}",
+                ConnectionString = _targetRedisContainer.GetConnectionString(),
                 InputFile = _dumpFilePath,
+                Databases = [specificDatabase],
                 Verbose = true
             };
             
-            var restoreResult = await restoreCommand.ExecuteAsync(null!, restoreSettings);
+            var restoreResult = await ExecuteDumpAndRestoreAsync(dumpSettings, restoreSettings);
             restoreResult.Should().Be(0, "Restore command should succeed");
-            
-            // Assert - Verify only the data from database 2 was restored
-            var targetConnection = await ConnectionMultiplexer.ConnectAsync(_targetRedisContainer.GetConnectionString());
-            var db2 = targetConnection.GetDatabase(specificDatabase);
-            
-            // Check the expected data in database 2
-            var db2Set = await db2.SetMembersAsync("db2-set1");
-            db2Set.Length.Should().Be(2, "Data from database 2 should be restored");
-            db2Set.Select(x => x.ToString()).Should().BeEquivalentTo(new[] { "db2-member1", "db2-member2" });
-            
-            // Verify that other databases don't have data (should be empty)
-            var db0 = targetConnection.GetDatabase(0);
-            (await db0.KeyExistsAsync("db0-string1")).Should().BeFalse("Data from database 0 should not be restored");
-            
-            var db1 = targetConnection.GetDatabase(1);
-            (await db1.KeyExistsAsync("db1-string1")).Should().BeFalse("Data from database 1 should not be restored");
-            
-            _output.WriteLine("Database specific restore verified successfully");
         }
         catch (Exception ex)
         {
             _output.WriteLine($"Test failed with exception: {ex}");
             throw;
         }
+
+        // Assert - Verify only the data from database 2 was restored
+        var targetConnection = await ConnectionMultiplexer.ConnectAsync(_targetRedisContainer.GetConnectionString());
+
+        // Verify database 2 was restored correctly
+        await VerifyDatabaseAsync(targetConnection, specificDatabase);
+
+        // Verify that other databases don't have data (should be empty)
+        for (int i = 0; i <= 3; i++)
+        {
+            if (i != specificDatabase)
+            {
+                var db = targetConnection.GetDatabase(i);
+                string prefix = $"db{i}-";
+                (await db.KeyExistsAsync($"{prefix}string1")).Should().BeFalse($"Data from database {i} should not be restored");
+            }
+        }
+
+        _output.WriteLine("Database specific restore verified successfully");
     }
     
     [Fact]
     public async Task ComplexConnectionStringOptionsTest()
     {
         // Arrange - Connect to source Redis and add test data
-        await SetupTestDataAsync();
+        var sourceConnection = await ConnectionMultiplexer.ConnectAsync(_sourceRedisContainer.GetConnectionString());
+        
+        // Populate the default database (0)
+        await PopulateDatabaseAsync(sourceConnection, 0);
 
         try
         {
-            // Act - Execute the dump command with complex connection options
-            _output.WriteLine("Executing Redis dump command with complex connection options...");
-            
-            var dumpCommand = new DumpCommand();
+            // Act - Execute the dump and restore commands with complex connection options
             var dumpSettings = new DumpCommandSettings
             {
                 // Add additional options to connection string
@@ -246,16 +243,6 @@ public class RedisDumpTests : IAsyncLifetime
                 Verbose = true
             };
             
-            var dumpResult = await dumpCommand.ExecuteAsync(null!, dumpSettings);
-            dumpResult.Should().Be(0, "Dump command should succeed");
-            
-            // Verify the dump file was created
-            File.Exists(_dumpFilePath).Should().BeTrue("Dump file should exist");
-            
-            // Execute the restore command with complex connection options
-            _output.WriteLine("Executing Redis restore command with complex connection options...");
-            
-            var restoreCommand = new RestoreCommand();
             var restoreSettings = new RestoreCommandSettings
             {
                 // Add additional options to connection string
@@ -265,33 +252,43 @@ public class RedisDumpTests : IAsyncLifetime
                 Flush = true // Also test the flush option
             };
             
-            var restoreResult = await restoreCommand.ExecuteAsync(null!, restoreSettings);
+            var restoreResult = await ExecuteDumpAndRestoreAsync(dumpSettings, restoreSettings);
             restoreResult.Should().Be(0, "Restore command should succeed");
-            
-            // Assert - Verify the data in target Redis
-            await VerifyRestoredDataAsync();
-            
-            _output.WriteLine("Complex connection options test completed successfully");
         }
         catch (Exception ex)
         {
             _output.WriteLine($"Test failed with exception: {ex}");
             throw;
         }
+
+        // Assert - Verify the data in target Redis
+        _output.WriteLine("Verifying restored data...");
+
+        var targetConnection = await ConnectionMultiplexer.ConnectAsync(_targetRedisContainer.GetConnectionString());
+
+        // Verify the default database (0)
+        await VerifyDatabaseAsync(targetConnection, 0);
+
+        _output.WriteLine("Complex connection options test completed successfully");
     }
     
     [Fact]
     public async Task RestoreFailsWhenKeysExistWithoutForceFlag()
     {
-        // Arrange - Connect to source Redis and add test data
-        await SetupTestDataAsync();
+        // Arrange
         
+        // Populate the default database (0)
+        var sourceConnection = await ConnectionMultiplexer.ConnectAsync(_sourceRedisContainer.GetConnectionString());
+        await PopulateDatabaseAsync(sourceConnection, 0);
+
+        // Add some pre-existing data to target Redis
+        var targetConnection = await ConnectionMultiplexer.ConnectAsync(_targetRedisContainer.GetConnectionString());
+        var targetDb = targetConnection.GetDatabase();
+        await targetDb.StringSetAsync("db0-string1", "existing-value");
+
         try
         {
-            // Act - Execute the dump command
-            _output.WriteLine("Executing Redis dump command...");
-            
-            var dumpCommand = new DumpCommand();
+            // Act - Execute the dump and restore commands
             var dumpSettings = new DumpCommandSettings
             {
                 ConnectionString = _sourceRedisContainer.GetConnectionString(),
@@ -299,21 +296,6 @@ public class RedisDumpTests : IAsyncLifetime
                 Verbose = true
             };
             
-            var dumpResult = await dumpCommand.ExecuteAsync(null!, dumpSettings);
-            dumpResult.Should().Be(0, "Dump command should succeed");
-            
-            // Verify the dump file was created
-            File.Exists(_dumpFilePath).Should().BeTrue("Dump file should exist");
-            
-            // Add some pre-existing data to target Redis
-            var targetConnection = await ConnectionMultiplexer.ConnectAsync(_targetRedisContainer.GetConnectionString());
-            var targetDb = targetConnection.GetDatabase();
-            await targetDb.StringSetAsync("string1", "existing-value");
-            
-            // Execute the restore command without force flag
-            _output.WriteLine("Executing Redis restore command without force flag...");
-            
-            var restoreCommand = new RestoreCommand();
             var restoreSettings = new RestoreCommandSettings
             {
                 ConnectionString = _targetRedisContainer.GetConnectionString() + ",allowAdmin=true", 
@@ -323,34 +305,39 @@ public class RedisDumpTests : IAsyncLifetime
             };
             
             // Execute the command and expect it to return non-zero (error)
-            var restoreResult = await restoreCommand.ExecuteAsync(null!, restoreSettings);
+            var restoreResult = await ExecuteDumpAndRestoreAsync(dumpSettings, restoreSettings);
             restoreResult.Should().Be(1, "Restore command should fail when keys exist without force flag");
-            
-            // Verify the existing key wasn't modified
-            var stringValue = await targetDb.StringGetAsync("string1");
-            stringValue.ToString().Should().Be("existing-value", "Pre-existing key should not be modified");
-            
-            _output.WriteLine("Test verified successfully - restore failed as expected");
         }
         catch (Exception ex)
         {
             _output.WriteLine($"Test failed with unexpected exception: {ex}");
             throw;
         }
+
+        // Assert: Verify the existing key wasn't modified
+        var stringValue = await targetDb.StringGetAsync("db0-string1");
+        stringValue.ToString().Should().Be("existing-value", "Pre-existing key should not be modified");
+
+        _output.WriteLine("Test verified successfully - restore failed as expected");
     }
     
     [Fact]
     public async Task RestoreSucceedsWithForceFlagWhenKeysExist()
     {
         // Arrange - Connect to source Redis and add test data
-        await SetupTestDataAsync();
-        
+        int targetDbId = 0;
+        // Populate the default database (0)
+        var sourceConnection = await ConnectionMultiplexer.ConnectAsync(_sourceRedisContainer.GetConnectionString());
+        await PopulateDatabaseAsync(sourceConnection, 0);
+
+        var targetConnection = await ConnectionMultiplexer.ConnectAsync(_targetRedisContainer.GetConnectionString());
+        var targetDb = targetConnection.GetDatabase(targetDbId);
+        await targetDb.StringSetAsync("db0-string1", "existing-value");
+        await targetDb.StringSetAsync("db0-string2", "existing-value2");
+
         try
         {
-            // Act - Execute the dump command
-            _output.WriteLine("Executing Redis dump command...");
-            
-            var dumpCommand = new DumpCommand();
+            // Act - Execute the dump and restore commands with force flag
             var dumpSettings = new DumpCommandSettings
             {
                 ConnectionString = _sourceRedisContainer.GetConnectionString(),
@@ -358,22 +345,6 @@ public class RedisDumpTests : IAsyncLifetime
                 Verbose = true
             };
             
-            var dumpResult = await dumpCommand.ExecuteAsync(null!, dumpSettings);
-            dumpResult.Should().Be(0, "Dump command should succeed");
-            
-            // Verify the dump file was created
-            File.Exists(_dumpFilePath).Should().BeTrue("Dump file should exist");
-            
-            // Add some pre-existing data to target Redis
-            var targetConnection = await ConnectionMultiplexer.ConnectAsync(_targetRedisContainer.GetConnectionString());
-            var targetDb = targetConnection.GetDatabase();
-            await targetDb.StringSetAsync("string1", "existing-value");
-            await targetDb.StringSetAsync("string2", "existing-value2");
-            
-            // Execute the restore command with force flag
-            _output.WriteLine("Executing Redis restore command with force flag...");
-            
-            var restoreCommand = new RestoreCommand();
             var restoreSettings = new RestoreCommandSettings
             {
                 ConnectionString = _targetRedisContainer.GetConnectionString(),
@@ -382,18 +353,18 @@ public class RedisDumpTests : IAsyncLifetime
                 Force = true
             };
             
-            var restoreResult = await restoreCommand.ExecuteAsync(null!, restoreSettings);
+            var restoreResult = await ExecuteDumpAndRestoreAsync(dumpSettings, restoreSettings);
             restoreResult.Should().Be(0, "Restore command should succeed with force flag");
             
             // Assert - Verify the data in target Redis was overwritten
-            var string1Value = await targetDb.StringGetAsync("string1");
-            string1Value.ToString().Should().Be("value1", "Key string1 should be overwritten with new value");
+            var string1Value = await targetDb.StringGetAsync("db0-string1");
+            string1Value.ToString().Should().Be("db0-value1", "Key db0-string1 should be overwritten with new value");
             
-            var string2Value = await targetDb.StringGetAsync("string2");
-            string2Value.ToString().Should().Be("value2", "Key string2 should be overwritten with new value");
+            var string2Value = await targetDb.StringGetAsync("db0-string2");
+            string2Value.ToString().Should().Be("db0-value2", "Key db0-string2 should be overwritten with new value");
             
             // Verify other restored data
-            await VerifyRestoredDataAsync();
+            await VerifyDatabaseAsync(targetConnection, 0);
             
             _output.WriteLine("Force flag test verified successfully - data was overwritten");
         }
@@ -408,14 +379,18 @@ public class RedisDumpTests : IAsyncLifetime
     public async Task FlushFlagShouldRemoveExistingKeysBeforeRestore()
     {
         // Arrange - Connect to source Redis and add test data
-        await SetupTestDataAsync();
-        
+        // Populate the default database (0)
+        var sourceConnection = await ConnectionMultiplexer.ConnectAsync(_sourceRedisContainer.GetConnectionString());
+        await PopulateDatabaseAsync(sourceConnection, 0);
+
+        // Add some extra data to target Redis that doesn't exist in source
+        var targetConnection = await ConnectionMultiplexer.ConnectAsync(_targetRedisContainer.GetConnectionString());
+        var targetDb = targetConnection.GetDatabase();
+        await targetDb.StringSetAsync("extra-key", "extra-value");
+
         try
         {
-            // Act - Execute the dump command
-            _output.WriteLine("Executing Redis dump command...");
-            
-            var dumpCommand = new DumpCommand();
+            // Act - Execute the dump and restore commands with flush and force flags
             var dumpSettings = new DumpCommandSettings
             {
                 ConnectionString = _sourceRedisContainer.GetConnectionString(),
@@ -423,18 +398,6 @@ public class RedisDumpTests : IAsyncLifetime
                 Verbose = true
             };
             
-            var dumpResult = await dumpCommand.ExecuteAsync(null!, dumpSettings);
-            dumpResult.Should().Be(0, "Dump command should succeed");
-            
-            // Add some extra data to target Redis that doesn't exist in source
-            var targetConnection = await ConnectionMultiplexer.ConnectAsync(_targetRedisContainer.GetConnectionString());
-            var targetDb = targetConnection.GetDatabase();
-            await targetDb.StringSetAsync("extra-key", "extra-value");
-            
-            // Execute the restore command with flush flag (which now requires force flag)
-            _output.WriteLine("Executing Redis restore command with flush and force flags...");
-            
-            var restoreCommand = new RestoreCommand();
             var restoreSettings = new RestoreCommandSettings
             {
                 ConnectionString = _targetRedisContainer.GetConnectionString() + ",allowAdmin=true", // Add allowAdmin to enable FLUSHDB
@@ -444,7 +407,7 @@ public class RedisDumpTests : IAsyncLifetime
                 Force = true // Force is now required with Flush
             };
             
-            var restoreResult = await restoreCommand.ExecuteAsync(null!, restoreSettings);
+            var restoreResult = await ExecuteDumpAndRestoreAsync(dumpSettings, restoreSettings);
             restoreResult.Should().Be(0, "Restore command should succeed with flush and force flags");
             
             // Assert - Verify the extra key was removed and only restored data exists
@@ -452,7 +415,7 @@ public class RedisDumpTests : IAsyncLifetime
             extraKeyExists.Should().BeFalse("Extra key should be removed by flush");
             
             // Verify restored data
-            await VerifyRestoredDataAsync();
+            await VerifyDatabaseAsync(targetConnection, 0);
             
             _output.WriteLine("Flush flag test verified successfully - database was cleaned before restore");
         }
@@ -484,176 +447,138 @@ public class RedisDumpTests : IAsyncLifetime
         
         _output.WriteLine("Validation correctly failed when using --flush without --force");
     }
-    
-    private async Task SetupTestDataAsync()
+
+    /// <summary>
+    /// Populates a Redis database with standard test data of all supported types
+    /// </summary>
+    /// <param name="connection">Redis connection multiplexer</param>
+    /// <param name="databaseId">The database ID to populate</param>
+    private async Task PopulateDatabaseAsync(ConnectionMultiplexer connection, int databaseId)
     {
-        var sourceConnection = await ConnectionMultiplexer.ConnectAsync(_sourceRedisContainer.GetConnectionString());
-        var sourceDb = sourceConnection.GetDatabase();
+        var db = connection.GetDatabase(databaseId);
+        string prefix = $"db{databaseId}-";
+        
+        _output.WriteLine($"Adding test data to database {databaseId}...");
 
-        _output.WriteLine("Adding test data to source Redis...");
+        // String values
+        await db.StringSetAsync($"{prefix}string1", $"{prefix}value1");
+        await db.StringSetAsync($"{prefix}string2", $"{prefix}value2");
+        await db.StringSetAsync($"{prefix}expiring-string", $"{prefix}value-with-ttl", TimeSpan.FromHours(1));
 
-        // Create string values
-        await sourceDb.StringSetAsync("string1", "value1");
-        await sourceDb.StringSetAsync("string2", "value2");
-        await sourceDb.StringSetAsync("expiring-string", "value-with-ttl", TimeSpan.FromHours(1));
+        // List
+        await db.ListRightPushAsync($"{prefix}list1", [
+            $"{prefix}item1", 
+            $"{prefix}item2", 
+            $"{prefix}item3"
+        ]);
 
-        // Create list
-        await sourceDb.ListRightPushAsync("list1", new RedisValue[] { "item1", "item2", "item3" });
+        // Set
+        await db.SetAddAsync($"{prefix}set1", [
+            $"{prefix}member1", 
+            $"{prefix}member2", 
+            $"{prefix}member3"
+        ]);
 
-        // Create set
-        await sourceDb.SetAddAsync("set1", new RedisValue[] { "member1", "member2", "member3" });
+        // Sorted set
+        await db.SortedSetAddAsync($"{prefix}zset1", [
+            new SortedSetEntry($"{prefix}member1", 1.0 + databaseId),
+            new SortedSetEntry($"{prefix}member2", 2.0 + databaseId),
+            new SortedSetEntry($"{prefix}member3", 3.0 + databaseId)
+        ]);
 
-        // Create sorted set
-        await sourceDb.SortedSetAddAsync("zset1", new[]
-        {
-            new SortedSetEntry("member1", 1.0),
-            new SortedSetEntry("member2", 2.0),
-            new SortedSetEntry("member3", 3.0)
-        });
-
-        // Create hash
-        await sourceDb.HashSetAsync("hash1", new[]
-        {
-            new HashEntry("field1", "value1"),
-            new HashEntry("field2", "value2"),
-            new HashEntry("field3", "value3")
-        });
-
-        _output.WriteLine("Test data added successfully");
+        // Hash
+        await db.HashSetAsync($"{prefix}hash1", [
+            new HashEntry("field1", $"{prefix}value1"),
+            new HashEntry("field2", $"{prefix}value2"),
+            new HashEntry("field3", $"{prefix}value3")
+        ]);
     }
     
-    private async Task SetupMultiDatabaseTestDataAsync()
+    /// <summary>
+    /// Verifies that a Redis database contains the expected standard test data
+    /// </summary>
+    /// <param name="connection">Redis connection multiplexer</param>
+    /// <param name="databaseId">The database ID to verify</param>
+    private async Task VerifyDatabaseAsync(ConnectionMultiplexer connection, int databaseId)
     {
-        var sourceConnection = await ConnectionMultiplexer.ConnectAsync(_sourceRedisContainer.GetConnectionString());
+        var db = connection.GetDatabase(databaseId);
+        string prefix = $"db{databaseId}-";
         
-        _output.WriteLine("Adding test data to multiple databases in source Redis...");
-
-        // Database 0 (default)
-        var db0 = sourceConnection.GetDatabase(0);
-        await db0.StringSetAsync("db0-string1", "db0-value1");
-        await db0.HashSetAsync("db0-hash1", new[] 
-        {
-            new HashEntry("field1", "db0-value1"),
-            new HashEntry("field2", "db0-value2")
-        });
-
-        // Database 1
-        var db1 = sourceConnection.GetDatabase(1);
-        await db1.StringSetAsync("db1-string1", "db1-value1");
-        await db1.ListRightPushAsync("db1-list1", new RedisValue[] { "db1-item1", "db1-item2" });
-        
-        // Database 2
-        var db2 = sourceConnection.GetDatabase(2);
-        await db2.SetAddAsync("db2-set1", new RedisValue[] { "db2-member1", "db2-member2" });
-        await db2.SortedSetAddAsync("db2-zset1", new[]
-        {
-            new SortedSetEntry("db2-member1", 10.0),
-            new SortedSetEntry("db2-member2", 20.0)
-        });
-        
-        // Database 3 with expiring keys
-        var db3 = sourceConnection.GetDatabase(3);
-        await db3.StringSetAsync("db3-expiring-string", "db3-value-with-ttl", TimeSpan.FromHours(1));
-
-        _output.WriteLine("Test data added successfully to multiple databases");
-    }
-    
-    private async Task VerifyRestoredDataAsync()
-    {
-        _output.WriteLine("Verifying restored data...");
-        
-        var targetConnection = await ConnectionMultiplexer.ConnectAsync(_targetRedisContainer.GetConnectionString());
-        var targetDb = targetConnection.GetDatabase();
+        _output.WriteLine($"Verifying data in database {databaseId}...");
         
         // Verify string values
-        (await targetDb.StringGetAsync("string1")).ToString().Should().Be("value1");
-        (await targetDb.StringGetAsync("string2")).ToString().Should().Be("value2");
-        (await targetDb.StringGetAsync("expiring-string")).ToString().Should().Be("value-with-ttl");
+        (await db.StringGetAsync($"{prefix}string1")).ToString().Should().Be($"{prefix}value1");
+        (await db.StringGetAsync($"{prefix}string2")).ToString().Should().Be($"{prefix}value2");
+        (await db.StringGetAsync($"{prefix}expiring-string")).ToString().Should().Be($"{prefix}value-with-ttl");
         
         // Verify expiring string has TTL
-        (await targetDb.KeyTimeToLiveAsync("expiring-string")).Should().NotBeNull();
+        (await db.KeyTimeToLiveAsync($"{prefix}expiring-string")).Should().NotBeNull();
         
         // Verify list
-        var list1 = await targetDb.ListRangeAsync("list1");
-        list1.Length.Should().Be(3);
-        list1[0].ToString().Should().Be("item1");
-        list1[1].ToString().Should().Be("item2");
-        list1[2].ToString().Should().Be("item3");
+        var list = await db.ListRangeAsync($"{prefix}list1");
+        list.Length.Should().Be(3);
+        list[0].ToString().Should().Be($"{prefix}item1");
+        list[1].ToString().Should().Be($"{prefix}item2");
+        list[2].ToString().Should().Be($"{prefix}item3");
         
         // Verify set
-        var set1 = await targetDb.SetMembersAsync("set1");
-        set1.Length.Should().Be(3);
-        set1.Select(x => x.ToString()).Should().BeEquivalentTo(new[] { "member1", "member2", "member3" });
+        var set = await db.SetMembersAsync($"{prefix}set1");
+        set.Length.Should().Be(3);
+        set.Select(x => x.ToString()).Should().BeEquivalentTo(new[] 
+        { 
+            $"{prefix}member1", 
+            $"{prefix}member2", 
+            $"{prefix}member3" 
+        });
         
         // Verify sorted set
-        var zset1 = await targetDb.SortedSetRangeByScoreWithScoresAsync("zset1");
-        zset1.Length.Should().Be(3);
-        zset1[0].Element.ToString().Should().Be("member1");
-        zset1[0].Score.Should().Be(1.0);
-        zset1[1].Element.ToString().Should().Be("member2");
-        zset1[1].Score.Should().Be(2.0);
-        zset1[2].Element.ToString().Should().Be("member3");
-        zset1[2].Score.Should().Be(3.0);
+        var zset = await db.SortedSetRangeByScoreWithScoresAsync($"{prefix}zset1");
+        zset.Length.Should().Be(3);
+        zset[0].Element.ToString().Should().Be($"{prefix}member1");
+        zset[0].Score.Should().Be(1.0 + databaseId);
+        zset[1].Element.ToString().Should().Be($"{prefix}member2");
+        zset[1].Score.Should().Be(2.0 + databaseId);
+        zset[2].Element.ToString().Should().Be($"{prefix}member3");
+        zset[2].Score.Should().Be(3.0 + databaseId);
         
         // Verify hash
-        var hash1 = await targetDb.HashGetAllAsync("hash1");
-        hash1.Length.Should().Be(3);
-        hash1.ToDictionary(x => x.Name.ToString(), x => x.Value.ToString())
+        var hash = await db.HashGetAllAsync($"{prefix}hash1");
+        hash.Length.Should().Be(3);
+        hash.ToDictionary(x => x.Name.ToString(), x => x.Value.ToString())
             .Should().BeEquivalentTo(new Dictionary<string, string>
             {
-                { "field1", "value1" },
-                { "field2", "value2" },
-                { "field3", "value3" }
+                { "field1", $"{prefix}value1" },
+                { "field2", $"{prefix}value2" },
+                { "field3", $"{prefix}value3" }
             });
     }
-    
-    
-    private async Task VerifyMultiDatabaseRestoredDataAsync()
+
+    /// <summary>
+    /// Executes the dump and restore operations with the specified settings
+    /// </summary>
+    /// <param name="dumpSettings">Settings for the dump command</param>
+    /// <param name="restoreSettings">Settings for the restore command</param>
+    /// <returns>The result code from the restore operation</returns>
+    private async Task<int> ExecuteDumpAndRestoreAsync(DumpCommandSettings dumpSettings, RestoreCommandSettings restoreSettings)
     {
-        _output.WriteLine("Verifying restored data across multiple databases...");
+        _output.WriteLine("Executing Redis dump command...");
         
-        var targetConnection = await ConnectionMultiplexer.ConnectAsync(_targetRedisContainer.GetConnectionString());
+        var dumpCommand = new DumpCommand();
         
-        // Verify Database 0
-        var db0 = targetConnection.GetDatabase(0);
-        (await db0.StringGetAsync("db0-string1")).ToString().Should().Be("db0-value1");
+        // Execute dump command
+        var dumpResult = await dumpCommand.ExecuteAsync(null!, dumpSettings);
+        dumpResult.Should().Be(0, "Dump command should succeed");
         
-        var db0Hash = await db0.HashGetAllAsync("db0-hash1");
-        db0Hash.ToDictionary(x => x.Name.ToString(), x => x.Value.ToString())
-            .Should().BeEquivalentTo(new Dictionary<string, string>
-            {
-                { "field1", "db0-value1" },
-                { "field2", "db0-value2" }
-            });
+        // Verify dump file was created
+        File.Exists(dumpSettings.OutputFile).Should().BeTrue("Dump file should exist");
         
-        // Verify Database 1
-        var db1 = targetConnection.GetDatabase(1);
-        (await db1.StringGetAsync("db1-string1")).ToString().Should().Be("db1-value1");
+        _output.WriteLine("Executing Redis restore command...");
         
-        var db1List = await db1.ListRangeAsync("db1-list1");
-        db1List.Length.Should().Be(2);
-        db1List[0].ToString().Should().Be("db1-item1");
-        db1List[1].ToString().Should().Be("db1-item2");
+        var restoreCommand = new RestoreCommand();
         
-        // Verify Database 2
-        var db2 = targetConnection.GetDatabase(2);
+        // Execute restore command
+        var restoreResult = await restoreCommand.ExecuteAsync(null!, restoreSettings);
         
-        var db2Set = await db2.SetMembersAsync("db2-set1");
-        db2Set.Length.Should().Be(2);
-        db2Set.Select(x => x.ToString()).Should().BeEquivalentTo(new[] { "db2-member1", "db2-member2" });
-        
-        var db2ZSet = await db2.SortedSetRangeByScoreWithScoresAsync("db2-zset1");
-        db2ZSet.Length.Should().Be(2);
-        db2ZSet[0].Element.ToString().Should().Be("db2-member1");
-        db2ZSet[0].Score.Should().Be(10.0);
-        db2ZSet[1].Element.ToString().Should().Be("db2-member2");
-        db2ZSet[1].Score.Should().Be(20.0);
-        
-        // Verify Database 3
-        var db3 = targetConnection.GetDatabase(3);
-        (await db3.StringGetAsync("db3-expiring-string")).ToString().Should().Be("db3-value-with-ttl");
-        (await db3.KeyTimeToLiveAsync("db3-expiring-string")).Should().NotBeNull();
-        
-        _output.WriteLine("All data verified successfully across multiple databases");
+        return restoreResult;
     }
 } 

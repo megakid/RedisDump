@@ -87,23 +87,24 @@ return cjson.encode(result)
             
             var result = new Dictionary<int, Dictionary<string, object>>();
             
-            // Parse defaultDatabase from connection string if present
-            var specificDatabase = configOptions.DefaultDatabase;
-            
-            if (specificDatabase.HasValue)
+            // Use the database parameter if specified, otherwise process all databases
+            if (settings.Databases != null && settings.Databases.Length > 0)
             {
-                // Only dump specified database
-                AnsiConsole.MarkupLine($"[yellow]Dumping default database {specificDatabase.Value}...[/]");
-
-                await DumpDatabases(settings, [specificDatabase.Value], result, connection);
+                AnsiConsole.MarkupLine($"[yellow]Dumping {settings.Databases.Length} database(s): {string.Join(", ", settings.Databases)}...[/]");
+                await DumpDatabases(settings, settings.Databases, result, connection);
             }
             else
             {
-                // Dump all databases
-                AnsiConsole.MarkupLine("[yellow]No default database set, dumping all databases...[/]");
+                // Process all databases if Databases is null or empty
+                AnsiConsole.MarkupLine("[yellow]No databases specified, dumping all databases...[/]");
                 
                 // Get the number of databases
-                var databaseCount = server.DatabaseCount == 0 ? 16 : server.DatabaseCount;
+                var databaseCount = server.DatabaseCount;
+                if (databaseCount == 0)
+                {
+                    AnsiConsole.MarkupLine("[yellow]Supported database count returned 0 (can happen with AWS ElastiCache etc), using fallback of 16[/]");
+                    databaseCount = 16;
+                }
                 
                 await DumpDatabases(settings, Enumerable.Range(0, databaseCount), result, connection);
             }
@@ -159,12 +160,13 @@ return cjson.encode(result)
         var task = ctx.AddTask($"[green]Dumping database {databaseNumber}[/]");
 
         var db = connection.GetDatabase(databaseNumber);
-        var server = connection.GetServer(connection.GetEndPoints().First());
+        var servers = connection.GetServers();
         
         var result = new Dictionary<string, object>();
 
-        // Get all keys
-        var keys = server.Keys(databaseNumber, pattern: "*")
+        // Get all keys from all servers, distinct them since if we're in replication mode, we'll get the same key from different servers
+        var keys = servers.SelectMany(s => s.Keys(databaseNumber, pattern: "*"))
+            .DistinctBy(x => x.ToString())
             .OrderBy(x => x.ToString())
             .ToArray();
 
@@ -198,7 +200,7 @@ return cjson.encode(result)
                 // Execute the Lua script with the current batch of keys
                 var scriptResult = await db.ScriptEvaluateAsync(
                     LuaDumpScript,
-                    batchKeys.Select(k => k).ToArray()
+                    batchKeys.ToArray()
                 );
                 
                 // Parse the JSON result
