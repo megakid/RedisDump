@@ -1,25 +1,7 @@
-mode: ContinuousDeployment
-major-version-bump-message: '\+semver:\s?(breaking|major)'
-minor-version-bump-message: '\+semver:\s?(feature|minor)'
-patch-version-bump-message: '\+semver:\s?(fix|patch)'
-no-bump-message: '\+semver:\s?(none|skip)'
-
+mode: ContinuousDelivery
 branches:
   main:
     regex: ^main$
-    mode: ContinuousDeployment
+    mode: ContinuousDelivery
     increment: Patch
-    prevent-increment-of-merged-branch-version: false
-    track-merge-target: false
     is-mainline: true
-  
-  feature:
-    regex: ^features?[/-]
-    mode: ContinuousDeployment
-    tag: useBranchName
-    increment: Inherit
-    prevent-increment-of-merged-branch-version: false
-    track-merge-target: false
-
-ignore:
-  sha: [] 
